@@ -1,0 +1,19 @@
+import React,{useEffect,useRef,useState} from 'react';
+import {X,LoaderCircle,Search,FolderOpen,Plus,AlertCircle,Check} from 'lucide-react';
+import {api,statuses} from './lib';
+export function IconButton({icon:Icon,label,...props}){return <button className="icon-button" aria-label={label} title={label} {...props}><Icon size={18}/></button>;}
+export function Button({children,icon:Icon,variant='primary',busy=false,...props}){return <button className={'button '+variant} {...props} disabled={busy||props.disabled}>{busy?<LoaderCircle size={17} className="spin"/>:Icon&&<Icon size={17}/>}<span>{children}</span></button>;}
+export function Badge({value,map=statuses}){const [label,color]=map[value]||[value,'gray'];return <span className={'badge '+color}><i/>{label}</span>;}
+export function Field({label,children,help,required=false,className=''}){return <label className={'field '+className}><span>{label}{required&&<b className="required"> *</b>}</span>{children}{help&&<small>{help}</small>}</label>;}
+export function ErrorNote({error}){return error?<div className="error-note" role="alert"><AlertCircle size={18}/><span>{error.message||error}</span></div>:null;}
+export function Loading(){return <div className="loading" role="status"><LoaderCircle className="spin" size={24}/><span>Chargement…</span></div>;}
+export function Empty({title,children,action,icon:Icon=FolderOpen}){return <div className="empty"><span className="empty-icon"><Icon size={29} strokeWidth={1.35}/></span><h3>{title}</h3><p>{children}</p>{action}</div>;}
+export function SearchBox({value,onChange,placeholder='Rechercher un dossier…'}){return <div className="search-box"><Search size={17}/><input aria-label={placeholder} placeholder={placeholder} value={value} onChange={e=>onChange(e.target.value)}/>{value&&<button aria-label="Effacer la recherche" onClick={()=>onChange('')}><X size={15}/></button>}</div>;}
+export function Progress({value,label}){return <div className="progress-wrap"><div className="progress" role="progressbar" aria-label={label||'Progression'} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value}><div style={{width:value+'%'}}/></div><span>{value}%</span></div>;}
+export function PageHeader({eyebrow,title,description,action}){return <div className="page-heading"><div><span className="eyebrow">{eyebrow||'NOOSE · PORTAIL INTERNE'}</span><h1>{title}</h1>{description&&<p>{description}</p>}</div>{action}</div>;}
+export function Dialog({title,subtitle,onClose,children,wide=false}){
+ const ref=useRef();useEffect(()=>{ref.current.showModal();const old=document.body.style.overflow;document.body.style.overflow='hidden';return()=>{document.body.style.overflow=old;};},[]);
+ return <dialog ref={ref} className={'modal '+(wide?'wide':'')} onCancel={e=>{e.preventDefault();onClose();}} onClick={e=>{if(e.target===ref.current){const r=ref.current.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)onClose();}}} aria-labelledby="dialog-title"><div className="modal-header"><div><h2 id="dialog-title">{title}</h2>{subtitle&&<p>{subtitle}</p>}</div><IconButton label="Fermer" icon={X} onClick={onClose}/></div>{children}</dialog>;
+}
+export function useResource(path,deps=[]){const [value,setValue]=useState(null),[error,setError]=useState(null),[version,setVersion]=useState(0);useEffect(()=>{let active=true;setError(null);api(path).then(v=>{if(active)setValue(v);}).catch(e=>{if(active)setError(e);});return()=>{active=false;};},[path,version,...deps]);return {value,error,reload:()=>setVersion(v=>v+1),setValue};}
+export function SaveFooter({onClose,busy,label='Enregistrer'}){return <div className="form-footer"><Button type="button" variant="secondary" onClick={onClose} disabled={busy}>Annuler</Button><Button type="submit" busy={busy} icon={Check}>{label}</Button></div>;}

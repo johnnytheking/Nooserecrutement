@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+# Configuration d’essai gratuite. La base Postgres gratuite expire après 30 jours.
+# Pour un usage durable, choisir un plan de base payant avant cette échéance.
+databases:
+  - name: noose-intranet-db
+    plan: free
+    region: frankfurt
+    databaseName: noose
+    user: noose
+    ipAllowList: []
+
+services:
+  - type: web
+    name: noose-intranet
+    runtime: node
+    region: frankfurt
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: 24
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: noose-intranet-db
+          property: connectionString
+      - key: ADMIN_PASSWORD
+        sync: false

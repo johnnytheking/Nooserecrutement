@@ -1,0 +1,82 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {once} from 'node:events';
+import {randomBytes} from 'node:crypto';
+
+test('Parcours complet, restrictions de rôle, fichiers et persistance après redémarrage',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'noose-test-'));
+  const testPassword=randomBytes(24).toString('hex');
+  let child,base;
+  const start=async()=>{
+    child=spawn(process.execPath,['server/index.mjs'],{env:{...process.env,NODE_ENV:'test',PORT:'0',DATABASE_URL:'',SQLITE_PATH:join(directory,'test.sqlite'),ADMIN_PASSWORD:testPassword},stdio:['ignore','pipe','pipe']});
+    let logs='';child.stderr.on('data',data=>{logs+=data.toString();});
+    base=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('Serveur de test indisponible : '+logs)),15000);child.stdout.on('data',data=>{const port=/0\.0\.0\.0:(\d+)/.exec(data.toString());if(port){clearTimeout(timer);resolve('http://127.0.0.1:'+port[1]);}});child.once('exit',code=>{clearTimeout(timer);reject(new Error('Arrêt prématuré '+code+': '+logs));});});
+  };
+  const stop=async()=>{if(child?.exitCode==null){child.kill('SIGTERM');await once(child,'exit');}};
+  const request=async(path,{method='GET',body,session,headers={}}={})=>{
+    const r=await fetch(base+'/api'+path,{method,headers:{...(body instanceof FormData?{}:{'content-type':'application/json'}),...(session?{cookie:session.cookie,'x-noose-csrf':session.csrf}:{}),...headers},body:body?(body instanceof FormData?body:JSON.stringify(body)):undefined});
+    const result=r.headers.get('content-type')?.includes('application/json')?await r.json():Buffer.from(await r.arrayBuffer());
+    return {status:r.status,result,headers:r.headers};
+  };
+  const login=async(username,password)=>{
+    const r=await request('/login',{method:'POST',body:{username,password}});assert.equal(r.status,200,'Connexion réussie');
+    assert.match(r.headers.get('set-cookie'),/HttpOnly/);assert.match(r.headers.get('set-cookie'),/SameSite=Strict/);assert.equal(r.result.user.password_hash,undefined);
+    return {cookie:r.headers.get('set-cookie').split(';')[0],csrf:r.result.csrf,user:r.result.user};
+  };
+  try{
+    await start();
+    assert.equal((await fetch(base+'/healthz')).status,200);
+    assert.equal((await request('/candidates')).status,401);
+    assert.equal((await request('/login',{method:'POST',body:{username:'admin',password:'incorrect'}})).status,401);
+    const admin=await login('admin',testPassword);
+    const settings=(await request('/settings',{session:admin})).result;
+    assert.equal(settings.questions.length,10);
+    assert.equal(settings.training.length,6);
+    const candidate={reference:'TEST-001',first_name:'Alex',last_name:'Exemple',department:'NOOSE',recruited_at:'2026-10-02',recruiter:'Test',notes:'Personnage fictif de test'};
+    assert.equal((await request('/candidates',{method:'POST',body:candidate,session:{...admin,csrf:'incorrect'}})).status,403);
+    assert.equal((await request('/candidates',{method:'POST',body:candidate,session:admin,headers:{origin:'https://example.invalid'}})).status,403);
+    let r=await request('/candidates',{method:'POST',body:candidate,session:admin});assert.equal(r.status,201);const c=r.result;
+    assert.equal((await request('/candidates',{method:'POST',body:candidate,session:admin})).status,409);
+    r=await request('/candidates/'+c.id,{method:'PUT',body:{...c,status:'entretien'},session:admin});assert.equal(r.status,200);
+    assert.equal((await request('/candidates/'+c.id,{method:'PUT',body:c,session:admin})).status,409);
+    const answers=settings.questions.map(a=>({question_id:a.id,title:a.title,expected:a.expected,answer:'Réponse fictive évaluée par le recruteur',accuracy:'correcte',rating:4,comment:''}));
+    assert.equal((await request('/candidates/'+c.id+'/interview',{method:'PUT',body:{answers,comment:'Entretien de test',version:0},session:admin})).status,200);
+    assert.equal((await request('/candidates/'+c.id+'/interview',{method:'PUT',body:{answers,comment:'Modification périmée',version:0},session:admin})).status,409);
+    const account={username:'formateur.test',name:'Formateur de test',role:'formateur',password:randomBytes(16).toString('hex')};
+    const createdUser=await request('/admin/users',{method:'POST',body:account,session:admin});assert.equal(createdUser.status,201);
+    const trainer=await login(account.username,account.password);
+    assert.equal((await request('/admin/users',{session:trainer})).status,403);
+    assert.equal((await request('/documents',{session:trainer})).status,403);
+    assert.equal((await request('/candidates',{method:'POST',body:{...candidate,reference:'FORBIDDEN'},session:trainer})).status,403);
+    const detail=(await request('/candidates/'+c.id,{session:trainer})).result;
+    assert.equal(detail.candidate.phone,undefined);assert.equal(detail.interview,null);assert.equal(detail.documents.length,0);
+    const stage=settings.training.find(t=>t.category==='formation');
+    const evalData={training_id:stage.id,status:'valide',evaluated_at:new Date().toISOString().slice(0,10),comment:'Validation fictive'};
+    assert.equal((await request('/candidates/'+c.id+'/evaluations',{method:'POST',body:evalData,session:trainer})).status,201);
+    assert.equal((await request('/candidates/'+c.id+'/evaluations',{method:'POST',body:{...evalData,training_id:settings.training.find(t=>t.category==='administratif').id},session:trainer})).status,403);
+    const recurrence=settings.training.find(t=>t.recurring);
+    for(const status of ['a_revoir','valide'])assert.equal((await request('/candidates/'+c.id+'/evaluations',{method:'POST',body:{...evalData,training_id:recurrence.id,status},session:trainer})).status,201);
+    const file=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1sAAAAASUVORK5CYII=','base64');
+    const form=new FormData();form.append('category','portrait');form.append('file',new Blob([file],{type:'image/png'}),'portrait-test.png');
+    r=await request('/candidates/'+c.id+'/documents',{method:'POST',body:form,session:admin});assert.equal(r.status,201);const docId=r.result.id;
+    assert.equal((await request('/documents/'+docId+'/download')).status,401);
+    assert.equal((await request('/documents/'+docId+'/download',{session:trainer})).status,403);
+    r=await request('/documents/'+docId+'/download',{session:admin});assert.equal(r.status,200);assert.deepEqual(r.result,file);assert.match(r.headers.get('content-disposition'),/^attachment;/);
+    const invalidFile=new FormData();invalidFile.append('category','identite');invalidFile.append('file',new Blob(['<script>alert(1)</script>'],{type:'image/png'}),'fake.png');
+    assert.equal((await request('/candidates/'+c.id+'/documents',{method:'POST',body:invalidFile,session:admin})).status,400);
+    assert.equal((await request('/documents/'+docId,{method:'PATCH',body:{status:'valide',comment:'Conforme (test)'},session:admin})).status,200);
+    r=await request('/candidates',{session:admin});assert.equal(r.result[0].score,40);assert.equal(r.result[0].scored,10);assert.equal(r.result[0].completed,1);assert.equal(r.result[0].document_count,1);assert.equal(r.result[0].pending_documents,0);
+    assert.equal((await request('/admin/users/'+createdUser.result.id,{method:'PATCH',body:{name:account.name,role:account.role,active:0},session:admin})).status,200);
+    assert.equal((await request('/me',{session:trainer})).status,401);
+    assert.equal((await request('/admin/users/'+admin.user.id,{method:'PATCH',body:{name:'Admin',role:'recruteur',active:0},session:admin})).status,400);
+    await stop();await start();
+    r=await request('/candidates/'+c.id,{session:admin});assert.equal(r.status,200);assert.equal(r.result.evaluations.length,3);assert.equal(r.result.interview.answers.length,10);assert.ok(r.result.history.length>=7);
+    assert.deepEqual((await request('/documents/'+docId+'/download',{session:admin})).result,file);
+    assert.equal((await request('/logout',{method:'POST',body:{},session:admin})).status,200);
+    assert.equal((await request('/me',{session:admin})).status,401);
+  }finally{await stop();await rm(directory,{recursive:true,force:true});}
+});
